@@ -267,6 +267,48 @@ class Decoder(nn.Module):
     def forward(self, x):
         return self.decoder(x)
 
+class VGGPerceptualLoss(torch.nn.Module):
+    def __init__(self, resize=True):
+        super(VGGPerceptualLoss, self).__init__()
+        blocks = []
+        blocks.append(torchvision.models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[:4].eval())
+        blocks.append(torchvision.models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[4:9].eval())
+        blocks.append(torchvision.models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[9:16].eval())
+        blocks.append(torchvision.models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[16:23].eval())
+        for bl in blocks:
+            for p in bl.parameters():
+                p.requires_grad = False
+        self.blocks = torch.nn.ModuleList(blocks)
+        self.transform = torch.nn.functional.interpolate
+        self.resize = resize
+        self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
+    def forward(self, input, target, feature_layers=[0, 1, 2, 3], style_layers=[]):
+        if input.shape[1] != 3:
+            input = input.repeat(1, 3, 1, 1)
+            target = target.repeat(1, 3, 1, 1)
+        input = (input-self.mean) / self.std
+        target = (target-self.mean) / self.std
+        if self.resize:
+            input = self.transform(input, mode='bilinear', size=(224, 224), align_corners=False)
+            target = self.transform(target, mode='bilinear', size=(224, 224), align_corners=False)
+        loss = 0.0
+        x = input
+        y = target
+        for i, block in enumerate(self.blocks):
+            x = block(x)
+            y = block(y)
+            if i in feature_layers:
+                loss += torch.nn.functional.l1_loss(x, y)
+            if i in style_layers:
+                act_x = x.reshape(x.shape[0], x.shape[1], -1)
+                act_y = y.reshape(y.shape[0], y.shape[1], -1)
+                gram_x = act_x @ act_x.permute(0, 2, 1)
+                gram_y = act_y @ act_y.permute(0, 2, 1)
+                loss += torch.nn.functional.l1_loss(gram_x, gram_y)
+        return loss
+
 class EncoderDecoder(nn.Module):
     def __init__(self):
         super().__init__()
@@ -293,6 +335,7 @@ class MultiViewModel(pl.LightningModule):
 
         self.lr = learning_rate
         self.ms_ssim = MultiScaleStructuralSimilarityIndexMeasure(data_range=1.0)
+        self.vgg_perceptual = VGGPerceptualLoss() 
 
     def forward(self, x):
         return self.model(x)
@@ -300,11 +343,12 @@ class MultiViewModel(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.lr)
 
-    def reconstruction_loss(self, output, target, alpha = 0.2):
+    def reconstruction_loss(self, output, target, alpha = 0.2, beta = 0.4):
         print(f" output: {output.shape}, target: {target.shape}, output: {output.min} {output.max}, target: {target.min}, {target.max}")
         l1_loss = torch.nn.functional.smooth_l1_loss(output, target)
         ms_ssim_loss = 1 - self.ms_ssim(output, target)
-        return (1 - alpha - beta) * l1_loss + alpha * ms_ssim_loss
+        perceptual_loss = self.vgg_perceptual(output, target)
+        return (1 - alpha - beta) * l1_loss + alpha * ms_ssim_loss + beta * vgg_loss
 
     def log_images(self, source_image, target_image, output):
         # Combine images into grids for logging

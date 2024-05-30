@@ -131,27 +131,12 @@ class EMBEDData(pl.LightningDataModule):
         self.val_set = MultiViewDataset(self.val_data)
         self.test_set = MultiViewDataset(self.test_data)
 
-        # if self.batch_alpha > 0:
-        #     train_class_idx = [np.where(train_labels == t)[0] for t in np.unique(train_labels)]
-        #     train_batches = len(self.train_set) // self.batch_size            
-
-        #     self.train_sampler = SamplerFactory().get(
-        #             train_class_idx,
-        #             self.batch_size,
-        #             train_batches,
-        #             alpha=self.batch_alpha,
-        #             kind='fixed',
-        #         )
-
         print('samples (train): ',len(self.train_set))
         print('samples (val):   ',len(self.val_set))
         print('samples (test):  ',len(self.test_set))
     
     def train_dataloader(self):
-        # if self.batch_alpha == 0:
         return DataLoader(dataset=self.train_set, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True)
-        # else:
-        #     return DataLoader(dataset=self.train_set, batch_sampler=self.train_sampler, num_workers=self.num_workers, pin_memory=True)
 
     def val_dataloader(self):
         return DataLoader(dataset=self.val_set, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
@@ -248,31 +233,35 @@ class MultiViewDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.df)
 
-    # def get_labels(self):
-    #     return self.labels
-
 class Decoder(nn.Module):
     def __init__(self):
         super(Decoder, self).__init__()
         self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(512, 256, kernel_size=4, stride=4, padding=0),
+            nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2, padding=0),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
             
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=4, padding=0),
+            nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2, padding=0),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
 
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=4, padding=0),
+            nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2, padding=0),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
 
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=4, padding=0),
+            nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2, padding=0),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
 
-            nn.ConvTranspose2d(32, 1, kernel_size=4, stride=4, padding=0),
-            nn.Sigmoid()
+            nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2, padding=0),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+
+            nn.ConvTranspose2d(16, 8, kernel_size=2, stride=2, padding=0),
+            nn.BatchNorm2d(8),
+            nn.ReLU(inplace=True),
+
+            nn.ConvTranspose2d(8, 1, kernel_size=2, stride=2, padding=0),
         )
         
     def forward(self, x):
@@ -283,15 +272,14 @@ class EncoderDecoder(nn.Module):
         super().__init__()
         self.encoder = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
         # Remove fc and avgpool layers to preserve spatial information
-        # self.encoder = nn.Sequential(*list(resnet18.children())[:-2])
-
-        self.encoder.fc = nn.Identity()
+        self.encoder = nn.Sequential(*list(self.encoder.children())[:-2])
+        # Downsample using maxpool
+        self.maxpool = nn.MaxPool2d(kernel_size=4, stride=4)
         self.decoder = Decoder()
 
     def forward(self, x):
         x = self.encoder(x)
-        # Reshape and infer batch size
-        x = x.view(-1, 512, 1, 1)
+        x = self.maxpool(x)
         x = self.decoder(x)
         return x
 
@@ -312,10 +300,11 @@ class MultiViewModel(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.lr)
 
-    def reconstruction_loss(self, output, target):
+    def reconstruction_loss(self, output, target, alpha = 0.2):
+        print(f" output: {output.shape}, target: {target.shape}, output: {output.min} {output.max}, target: {target.min}, {target.max}")
         l1_loss = torch.nn.functional.smooth_l1_loss(output, target)
         ms_ssim_loss = 1 - self.ms_ssim(output, target)
-        return l1_loss/20 + ms_ssim_loss
+        return (1 - alpha - beta) * l1_loss + alpha * ms_ssim_loss
 
     def log_images(self, source_image, target_image, output):
         # Combine images into grids for logging

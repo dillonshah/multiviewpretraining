@@ -33,11 +33,11 @@ import numbers
 
 test_percent = 0.2
 val_percent = 0.1
-batch_size = 5
+batch_size = 10
 epochs = 10                 
 num_workers = 4
 
-num_devices = 1
+num_devices = 2
 
 # Transfrom taken from biomedia's mammo-net.py
 class GammaCorrectionTransform:
@@ -271,10 +271,10 @@ class VGGPerceptualLoss(torch.nn.Module):
     def __init__(self, resize=True):
         super(VGGPerceptualLoss, self).__init__()
         blocks = []
-        blocks.append(torchvision.models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[:4].eval())
-        blocks.append(torchvision.models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[4:9].eval())
-        blocks.append(torchvision.models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[9:16].eval())
-        blocks.append(torchvision.models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features[16:23].eval())
+        blocks.append(torchvision.models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1).features[:4].eval())
+        blocks.append(torchvision.models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1).features[4:9].eval())
+        blocks.append(torchvision.models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1).features[9:16].eval())
+        blocks.append(torchvision.models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1).features[16:23].eval())
         for bl in blocks:
             for p in bl.parameters():
                 p.requires_grad = False
@@ -344,11 +344,11 @@ class MultiViewModel(pl.LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.lr)
 
     def reconstruction_loss(self, output, target, alpha = 0.2, beta = 0.4):
-        print(f" output: {output.shape}, target: {target.shape}, output: {output.min} {output.max}, target: {target.min}, {target.max}")
+        normalised_output = (output-output.min())/(output.max()-output.min()) 
         l1_loss = torch.nn.functional.smooth_l1_loss(output, target)
         ms_ssim_loss = 1 - self.ms_ssim(output, target)
         perceptual_loss = self.vgg_perceptual(output, target)
-        return (1 - alpha - beta) * l1_loss + alpha * ms_ssim_loss + beta * vgg_loss
+        return (1 - alpha - beta) * l1_loss + alpha * ms_ssim_loss + beta * perceptual_loss
 
     def log_images(self, source_image, target_image, output):
         # Combine images into grids for logging

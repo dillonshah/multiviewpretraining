@@ -11,7 +11,6 @@ from torchmetrics.image import MultiScaleStructuralSimilarityIndexMeasure
 import torch.utils.checkpoint as checkpoint
 from torch.utils.data import DataLoader, Dataset
 
-
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -34,7 +33,7 @@ import numbers
 test_percent = 0.2
 val_percent = 0.1
 batch_size = 10
-epochs = 10                 
+epochs = 15                 
 num_workers = 4
 
 num_devices = 2
@@ -203,11 +202,14 @@ class MultiViewDataset(torch.utils.data.Dataset):
         return image
         
     def __getitem__(self, index): 
-        source_view_path = self.mlo_paths[index]
-        target_view_path = self.cc_paths[index]
+        # Randomly choose between mlo and cc, and unpack the paths accordingly
+        source_path, target_path = random.choice([
+            (self.mlo_paths[index], self.cc_paths[index]),
+            (self.cc_paths[index], self.mlo_paths[index])
+        ])
         
-        source = imread(source_view_path).astype(np.float32) / 65535.0
-        target = imread(target_view_path).astype(np.float32) / 65535.0
+        source = imread(source_path).astype(np.float32) / 65535.0
+        target = imread(target_path).astype(np.float32) / 65535.0
         
         source = self.preprocess(source)
         target = self.preprocess(target)
@@ -291,8 +293,8 @@ class VGGPerceptualLoss(torch.nn.Module):
         input = (input-self.mean) / self.std
         target = (target-self.mean) / self.std
         if self.resize:
-            input = self.transform(input, mode='bilinear', size=(224, 224), align_corners=False)
-            target = self.transform(target, mode='bilinear', size=(224, 224), align_corners=False)
+            input = self.transform(input, mode='bilinear', size=(512, 512), align_corners=False)
+            target = self.transform(target, mode='bilinear', size=(512, 512), align_corners=False)
         loss = 0.0
         x = input
         y = target
@@ -326,7 +328,7 @@ class EncoderDecoder(nn.Module):
         return x
 
 class MultiViewModel(pl.LightningModule):
-    def __init__(self, learning_rate=0.001, checkpoint=None):
+    def __init__(self, learning_rate=0.0001, checkpoint=None):
         super().__init__()
         self.model = EncoderDecoder() 
 
@@ -343,12 +345,13 @@ class MultiViewModel(pl.LightningModule):
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.lr)
 
-    def reconstruction_loss(self, output, target, alpha = 0.2, beta = 0.4):
+    def reconstruction_loss(self, output, target, alpha = 0.15, beta = 0.15):
         normalised_output = (output-output.min())/(output.max()-output.min()) 
-        l1_loss = torch.nn.functional.smooth_l1_loss(output, target)
-        ms_ssim_loss = 1 - self.ms_ssim(output, target)
-        perceptual_loss = self.vgg_perceptual(output, target)
-        return (1 - alpha - beta) * l1_loss + alpha * ms_ssim_loss + beta * perceptual_loss
+        l1_loss = torch.nn.functional.l1_loss(normalised_output, target)
+        ms_ssim_loss = 1 - self.ms_ssim(normalised_output, target)
+        perceptual_loss = self.vgg_perceptual(normalised_output, target)
+        return ((1 - alpha - beta) * l1_loss + alpha * ms_ssim_loss + beta * perceptual_loss, \
+         (l1_loss, ms_ssim_loss, perceptual_loss))
 
     def log_images(self, source_image, target_image, output):
         # Combine images into grids for logging
@@ -364,10 +367,13 @@ class MultiViewModel(pl.LightningModule):
         target_image = batch['target']
 
         output = self(source_image)  
-        loss = self.reconstruction_loss(output, target_image)
+        loss, losses = self.reconstruction_loss(output, target_image)
         if batch_idx % 5 == 0: 
             self.log_images(source_image, target_image, output)
         self.log('train_loss', loss, batch_size=batch_size)
+        self.log('Smooth L1 Loss', losses[0], batch_size=batch_size)
+        self.log('MS-SSIM Loss', losses[1], batch_size=batch_size)
+        self.log('Perceptual Loss', losses[2], batch_size=batch_size)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -375,7 +381,7 @@ class MultiViewModel(pl.LightningModule):
         target_image = batch['target']
 
         output = self(source_image)  
-        loss = self.reconstruction_loss(output, target_image)
+        loss, _ = self.reconstruction_loss(output, target_image)
 
         self.log('val_loss', loss.mean(), batch_size=batch_size)
 
@@ -384,7 +390,7 @@ class MultiViewModel(pl.LightningModule):
         target_image = batch['target']
 
         output = self(source_image) 
-        loss = self.reconstruction_loss(output, target_image)
+        loss, _ = self.reconstruction_loss(output, target_image)
 
         self.log('test_loss', loss.mean(), batch_size=batch_size)
 
@@ -409,6 +415,7 @@ class MultiViewEmbeddings(MultiViewModel):
         
 def main():
     torch.set_float32_matmul_precision('high')
+    pl.seed_everything(42, workers=True)
     data_module = EMBEDData(val_percent=val_percent, test_percent=test_percent, batch_size=batch_size, num_workers=num_workers)
     model = MultiViewModel()
 
@@ -442,8 +449,8 @@ def main():
 
     print("Saving Embeddings")
 
-    model_modified = MammoNetEmbeddings(init=model)
-    trainer.test(model=model_modified, datamodule=data, ckpt_path=trainer.checkpoint_callback.best_model_path)
+    model_modified = MultiViewEmbeddings(init=model)
+    trainer.test(model=model_modified, datamodule=data_module, ckpt_path=trainer.checkpoint_callback.best_model_path)
     save_embeddings(model=model_modified, output_fname=os.path.join(output_dir, 'embeddings.csv'))
 
 

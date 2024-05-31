@@ -40,10 +40,13 @@ class MammoData():
         return row['MLO_path'], row['CC_path']
 
 
-def load_model(model_path, device='cuda'): 
-    mammo_model = MammogramModel.load_from_checkpoint()
-    model = mammo_model.model
-    model.load_state_dict(torch.load(model_path))
+def load_model(model_path, device='cuda', checkpoint=False): 
+    if checkpoint:
+        mammo_model = MultiViewModel.load_from_checkpoint(model_path)
+        model = mammo_model.model
+    else:
+        model = EncoderDecoder()
+        model.load_state_dict(torch.load(model_path))
     model.to(device)
     model.eval() 
     return model
@@ -71,7 +74,7 @@ def normalize(image):
 
 if __name__ == "__main__":
     mammo_data = MammoData()
-
+    model = load_model("/vol/biomedic3/bglocker/ugproj2324/ds1021/multiviewpretraining/pretraining/runs/smoothl1/pretrained.pth", checkpoint=False)
     while True:
         idx = int(input("Enter an index to reconstruct an image: "))
         mlo_path, cc_path = mammo_data.get_random_sample_pair(idx)
